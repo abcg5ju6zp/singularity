@@ -89,6 +89,21 @@ type Storage struct {
 	Config       ConfigMap    `cbor:"3,keyasint,omitempty" gorm:"type:JSON"  json:"config"                              table:"verbose"` // Config is a map of key-value pairs that can be used to store RClone options.
 	ClientConfig ClientConfig `cbor:"4,keyasint,omitempty" gorm:"type:JSON"  json:"clientConfig"                        table:"verbose"` // ClientConfig is the HTTP configuration for the storage, if applicable.
 
+	// GenerationID is not persisted on the storage row: the storages columns
+	// mirror the currently active generation. It is populated when the Storage
+	// value is an immutable generation snapshot resolved for an operation, so
+	// callers can record the exact generation they used.
+	GenerationID *StorageGenerationID `cbor:"-" gorm:"-" json:"generationId,omitempty"`
+
+	// ActiveGenerationID atomically points at the generation new operations
+	// must pin. A storage update flips this single pointer in the same
+	// transaction that inserts the new generation, so there is always exactly
+	// one authoritative activation. Integrity is enforced in code (generations
+	// are deleted before their storage, and only after reference checks)
+	// rather than an FK to avoid a circular constraint with the generations
+	// table during migration.
+	ActiveGenerationID *StorageGenerationID `cbor:"-" gorm:"index" json:"activeGenerationId,omitempty"`
+
 	// Associations
 	PreparationsAsSource []Preparation `cbor:"-" gorm:"many2many:source_attachments;constraint:OnDelete:CASCADE" json:"preparationsAsSource,omitempty" table:"expand;header:As Source: "`
 	PreparationsAsOutput []Preparation `cbor:"-" gorm:"many2many:output_attachments;constraint:OnDelete:CASCADE" json:"preparationsAsOutput,omitempty" table:"expand;header:As Output: "`
@@ -120,6 +135,12 @@ type SourceAttachment struct {
 	Preparation   *Preparation  `gorm:"foreignKey:PreparationID;constraint:OnDelete:CASCADE" json:"preparation,omitempty" swaggerignore:"true"`
 	StorageID     StorageID     `gorm:"uniqueIndex:prep_source"                              json:"storageId"`
 	Storage       *Storage      `gorm:"foreignKey:StorageID;constraint:OnDelete:CASCADE"     json:"storage,omitempty"     swaggerignore:"true"`
+
+	// StorageGenerationID records the generation that was active when the
+	// source was attached. It gives the association an auditable configuration
+	// lineage; running jobs additionally pin their own source generation at
+	// claim time on the Job row.
+	StorageGenerationID *StorageGenerationID `gorm:"index" json:"storageGenerationId,omitempty"`
 }
 
 func (s *SourceAttachment) FindByPreparationAndSource(db *gorm.DB, preparation string, source string) error {
@@ -170,6 +191,10 @@ type OutputAttachment struct {
 	Preparation   *Preparation  `gorm:"foreignKey:PreparationID;constraint:OnDelete:CASCADE" json:"preparation,omitempty" swaggerignore:"true"`
 	StorageID     StorageID     `gorm:"uniqueIndex:prep_output"                              json:"storageId"`
 	Storage       *Storage      `gorm:"foreignKey:StorageID;constraint:OnDelete:CASCADE"     json:"storage,omitempty"     swaggerignore:"true"`
+
+	// StorageGenerationID records the generation that was active when the
+	// output storage was attached.
+	StorageGenerationID *StorageGenerationID `gorm:"index" json:"storageGenerationId,omitempty"`
 }
 
 type JobID uint64
@@ -189,6 +214,13 @@ type Job struct {
 	AttachmentID *SourceAttachmentID `gorm:"index"                                                          json:"attachmentId"         table:"verbose"`
 	Attachment   *SourceAttachment   `gorm:"foreignKey:AttachmentID;constraint:OnDelete:SET NULL"           json:"attachment,omitempty" swaggerignore:"true" table:"expand"`
 	FileRanges   []FileRange         `gorm:"foreignKey:JobID;constraint:OnDelete:SET NULL"                  json:"fileRanges,omitempty" swaggerignore:"true" table:"-"`
+
+	// SourceGenerationID pins the immutable storage generation the job first
+	// claimed. Every attempt of the job, including delayed retries and retries
+	// after a worker crash or process restart, keeps using this generation; it
+	// is never silently rewritten by later storage updates. Nil only for rows
+	// created outside the generation-aware flow (legacy/test fixtures).
+	SourceGenerationID *StorageGenerationID `gorm:"index" json:"sourceGenerationId,omitempty"`
 }
 
 type FileID uint64
@@ -210,6 +242,12 @@ type File struct {
 	DirectoryID  *DirectoryID        `cbor:"-" gorm:"index"                                                json:"directoryId"`
 	Directory    *Directory          `cbor:"-" gorm:"foreignKey:DirectoryID;constraint:OnDelete:CASCADE"   json:"directory,omitempty"  swaggerignore:"true"`
 	FileRanges   []FileRange         `cbor:"-" gorm:"constraint:OnDelete:CASCADE"                          json:"fileRanges,omitempty"`
+
+	// StorageGenerationID pins the generation under which this file version
+	// was scanned and verified. Later reads of the file (content serving,
+	// download, inline piece assembly) reuse that exact generation, so a
+	// storage update cannot make the same path resolve to different bytes.
+	StorageGenerationID *StorageGenerationID `cbor:"-" gorm:"index" json:"storageGenerationId,omitempty"`
 }
 
 func (i File) FileName() string {
@@ -271,6 +309,13 @@ type Car struct {
 	Storage             *Storage   `cbor:"-"                    gorm:"foreignKey:StorageID;constraint:OnDelete:SET NULL" json:"storage,omitempty"                   swaggerignore:"true" table:"expand"`
 	StoragePath         string     `cbor:"-"                    json:"storagePath"` // StoragePath is the path to the CAR file inside the storage. If the StorageID is nil but StoragePath is not empty, it means the CAR file is stored at the local absolute path.
 	NumOfFiles          int64      `cbor:"-"                    json:"numOfFiles"                                        table:"verbose"`
+
+	// StorageGenerationID pins the output generation the CAR was written
+	// with. Content serving, downloads and the PDP/DDO submission chain (deal
+	// -> piece CID -> car) resolve the backend through this generation, so the
+	// CAR keeps being read from exactly where it was written even after the
+	// storage is updated. Nil for inline cars and legacy rows.
+	StorageGenerationID *StorageGenerationID `cbor:"-" gorm:"index" json:"storageGenerationId,omitempty"`
 
 	// Association - SET NULL for fast prep deletion, async cleanup
 	PreparationID *PreparationID      `cbor:"-" gorm:"index"                                                 json:"preparationId"         table:"-"`

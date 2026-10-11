@@ -73,14 +73,14 @@ func TestPushFile(t *testing.T) {
 		require.NoError(t, err)
 
 		// First push
-		file, fileRanges, err := PushFile(ctx, db, obj, attachment, cache)
+		file, fileRanges, err := PushFile(ctx, db, obj, attachment, cache, nil)
 		require.NoError(t, err)
 		require.Equal(t, "test.txt", file.Path)
 		require.EqualValues(t, 11, file.Size)
 		require.Len(t, fileRanges, 3)
 
 		// Second push with same file
-		file, fileRanges, err = PushFile(ctx, db, obj, attachment, cache)
+		file, fileRanges, err = PushFile(ctx, db, obj, attachment, cache, nil)
 		require.NoError(t, err)
 		require.Nil(t, file)
 		require.Nil(t, fileRanges)

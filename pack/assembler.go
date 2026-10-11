@@ -177,7 +177,17 @@ func (a *Assembler) prefetch() error {
 	firstChunk := false
 	if a.fileReadCloser == nil {
 		fileRange := a.fileRanges[a.index]
-		readCloser, obj, err := a.reader.Read(a.ctx, fileRange.File.Path, fileRange.Offset, fileRange.Length)
+		// route the read to the generation this exact file version
+		// was scanned under, if the reader supports generation routing
+		reader := a.reader
+		if router, ok := a.reader.(storagesystem.FileReaderRouter); ok {
+			resolved, err := router.ReaderForFile(*fileRange.File)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+			reader = resolved
+		}
+		readCloser, obj, err := reader.Read(a.ctx, fileRange.File.Path, fileRange.Offset, fileRange.Length)
 		if err != nil {
 			if a.skipInaccessibleFiles {
 				logger.Warnf("skipping inaccessible file %s: %v", fileRange.File.Path, err)

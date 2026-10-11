@@ -11,6 +11,24 @@ and the complete PR list -- live in its
 
 ## [Unreleased]
 
+### Storage configuration generations
+
+- Updating a storage connection now appends an **immutable, atomically
+  activated configuration generation** instead of overwriting the shared row.
+  New operations pin the generation active at their start; claimed jobs
+  (including delayed retries and retries after worker crashes/restarts),
+  long-lived readers and in-flight service requests keep their pinned
+  generation until they finish, so a credential/address update can no longer
+  make a running scan, pack, CAR write, download, content serve or
+  PDP/DDO submission switch backends mid-operation or read different
+  bytes for the same file.
+- Attachments, jobs, scanned files and written CARs record the generation
+  they use; the content server and download server resolve backends through
+  those pins. A storage rename no longer changes generation identity,
+  failed validation leaves the previous generation active, unreferenced
+  generations are garbage collected on update, and a storage referenced by
+  any generation cannot be deleted.
+
 ## [1.0.0] "Cygnus" -- 2026-08-07
 
 First major release since v0.5.17, superseding the v0.6/v0.7 release-candidate

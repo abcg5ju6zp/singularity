@@ -99,6 +99,11 @@ var (
 // GetRandomOutputWriter selects a storage from the provided storages list based on its available
 // space and returns an associated Writer to interact with that storage.
 //
+// The storages must be generation snapshots (see ActiveSnapshots): the
+// returned generation ID is the immutable output generation the CAR will be
+// written under and must be persisted on the Car row. The storage ID pointer
+// is nil when no output storage is configured (inline preparation).
+//
 // The function works as follows:
 //  1. Iterates over each storage to obtain its usage information (free and total space).
 //  2. Calculates a weight for each storage based on its free space ratio.
@@ -107,28 +112,30 @@ var (
 //
 // Parameters:
 //   - ctx: A context that allows for timeout or cancellation of operations.
-//   - storages: A slice of storage models to choose from.
+//   - storages: A slice of storage generation snapshots to choose from.
 //
 // Returns:
 //   - A pointer to the ID of the selected storage.
+//   - A pointer to the storage generation ID selected.
 //   - A Writer object that can be used to write data to the selected storage.
 //   - An error if the function encounters any issues during its operation or if no suitable storage
 //     is found. If all storages are full, it returns the ErrStorageNotAvailable error.
-func GetRandomOutputWriter(ctx context.Context, storages []model.Storage) (*model.StorageID, Writer, error) {
+func GetRandomOutputWriter(ctx context.Context, storages []model.Storage) (*model.StorageID, *model.StorageGenerationID, Writer, error) {
 	if len(storages) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	var handlersWithWeight []struct {
-		id      model.StorageID
-		handler Writer
-		weight  float64
+		id           model.StorageID
+		generationID *model.StorageGenerationID
+		handler      Writer
+		weight       float64
 	}
 
 	for _, storage := range storages {
 		handler, err := NewRCloneHandler(ctx, storage)
 		if err != nil {
-			return nil, nil, errors.Wrapf(err, "failed to get storage handler for %s", storage.Name)
+			return nil, nil, nil, errors.Wrapf(err, "failed to get storage handler for %s", storage.Name)
 		}
 		usage, err := handler.About(ctx)
 
@@ -142,13 +149,15 @@ func GetRandomOutputWriter(ctx context.Context, storages []model.Storage) (*mode
 				continue
 			}
 			handlersWithWeight = append(handlersWithWeight, struct {
-				id      model.StorageID
-				handler Writer
-				weight  float64
+				id           model.StorageID
+				generationID *model.StorageGenerationID
+				handler      Writer
+				weight       float64
 			}{
-				id:      storage.ID,
-				handler: handler,
-				weight:  float64(*usage.Free) / float64(*usage.Total),
+				id:           storage.ID,
+				generationID: storage.GenerationID,
+				handler:      handler,
+				weight:       float64(*usage.Free) / float64(*usage.Total),
 			})
 			continue
 		}
@@ -160,19 +169,21 @@ func GetRandomOutputWriter(ctx context.Context, storages []model.Storage) (*mode
 		}
 
 		handlersWithWeight = append(handlersWithWeight, struct {
-			id      model.StorageID
-			handler Writer
-			weight  float64
+			id           model.StorageID
+			generationID *model.StorageGenerationID
+			handler      Writer
+			weight       float64
 		}{
-			id:      storage.ID,
-			handler: handler,
-			weight:  1.0,
+			id:           storage.ID,
+			generationID: storage.GenerationID,
+			handler:      handler,
+			weight:       1.0,
 		})
 	}
 
 	// If there is no space left in any of the output storages, return an error.
 	if len(handlersWithWeight) == 0 {
-		return nil, nil, ErrStorageNotAvailable
+		return nil, nil, nil, ErrStorageNotAvailable
 	}
 
 	totalWeight := 0.0
@@ -185,11 +196,11 @@ func GetRandomOutputWriter(ctx context.Context, storages []model.Storage) (*mode
 	for _, item := range handlersWithWeight {
 		r -= item.weight
 		if r <= 0 {
-			return ptr.Of(item.id), item.handler, nil
+			return ptr.Of(item.id), item.generationID, item.handler, nil
 		}
 	}
 
-	return nil, nil, errors.New("this line should never be reached")
+	return nil, nil, nil, errors.New("this line should never be reached")
 }
 
 // Open offers a file handler like interface (io.ReadSeekCloser) to an RClone path

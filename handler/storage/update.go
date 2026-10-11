@@ -2,7 +2,10 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/cockroachdb/errors"
 	"github.com/data-preservation-programs/singularity/database"
@@ -11,6 +14,7 @@ import (
 	"github.com/data-preservation-programs/singularity/storagesystem"
 	"github.com/rjNemo/underscore"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type UpdateRequest struct {
@@ -18,49 +22,13 @@ type UpdateRequest struct {
 	ClientConfig model.ClientConfig `json:"clientConfig"`
 }
 
-// UpdateStorageHandler updates the configuration of a given storage system.
-//
-// This method performs the following operations:
-//   - Retrieves the storage system with the specified name.
-//   - Merges the new configuration with the current configuration.
-//   - Ensures the provided configuration is valid by checking the storage type's backend compatibility.
-//   - Initializes an RCloneHandler with the merged configuration to validate the config against the actual storage backend.
-//   - Updates the storage system's configuration in the database.
-//
-// Parameters:
-//   - ctx: A context.Context for request-scoped values, cancellation signals, and deadlines.
-//   - db: A *gorm.DB instance for database interactions.
-//   - name: The name of the storage system to be updated.
-//   - config: A map representing the new configuration values to be merged with the existing configuration.
-//
-// Returns:
-//   - A pointer to the updated storage model.
-//   - An error if there's an issue during the update process, otherwise nil.
-//
-// Note:
-//
-//	If the specified storage system does not exist, an error will be returned.
-//	The method also ensures that the merged configuration is valid and the storage backend is accessible
-//	using RCloneHandler. If the new configuration is invalid, or if the backend is inaccessible, an error is returned.
-func (DefaultHandler) UpdateStorageHandler(
-	ctx context.Context,
-	db *gorm.DB,
-	name string,
-	request UpdateRequest,
-) (*model.Storage, error) {
-	db = db.WithContext(ctx)
-
-	var storage model.Storage
-	err := storage.FindByIDOrName(db, name)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, errors.Wrapf(handlererror.ErrNotFound, "storage %s does not exist", name)
-	}
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
+// mergeStorageConfig merges an update request on top of the current storage
+// configuration, applying the same provider/default resolution used at create
+// time. It is pure so it can be evaluated while holding the storage row lock.
+func mergeStorageConfig(storage model.Storage, request UpdateRequest) (model.Storage, error) {
 	backend, ok := storagesystem.BackendMap[storage.Type]
 	if !ok {
-		return nil, errors.Newf("storage type %s is not supported", storage.Type)
+		return model.Storage{}, errors.Newf("storage type %s is not supported", storage.Type)
 	}
 
 	provider := storage.Config["provider"]
@@ -73,7 +41,7 @@ func (DefaultHandler) UpdateStorageHandler(
 		return providerOption.Provider == provider
 	})
 	if err != nil {
-		return nil, errors.Wrapf(handlererror.ErrInvalidParameter, "provider '%s' is not supported", provider)
+		return model.Storage{}, errors.Wrapf(handlererror.ErrInvalidParameter, "provider '%s' is not supported", provider)
 	}
 
 	for _, option := range providerOptions.Options {
@@ -92,27 +60,130 @@ func (DefaultHandler) UpdateStorageHandler(
 
 	storage.Config = rcloneConfig
 	OverrideStorageWithClientConfig(&storage, request.ClientConfig)
-	rclone, err := storagesystem.NewRCloneHandler(ctx, storage)
-	if err != nil {
-		return nil, errors.Join(handlererror.ErrInvalidParameter, errors.Wrap(err, "creating rclone handler failed"))
-	}
+	return storage, nil
+}
 
-	_, err = rclone.List(ctx, "")
-	if err != nil {
-		return nil, errors.Join(handlererror.ErrInvalidParameter, errors.Wrap(err, "listing the storage failed"))
+// lockStorageForUpdate loads the storage by ID or name while taking a row
+// lock. The lock is the single serialization point for generation activation.
+func lockStorageForUpdate(ctx context.Context, tx *gorm.DB, name string) (model.Storage, error) {
+	var storage model.Storage
+	query := tx.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"})
+	if id, parseErr := strconv.ParseUint(name, 10, 32); parseErr == nil && fmt.Sprintf("%d", id) == name {
+		err := query.First(&storage, id).Error
+		return storage, err
 	}
+	err := query.Where("name = ?", name).First(&storage).Error
+	return storage, err
+}
 
-	err = database.DoRetry(ctx, func() error {
-		return db.Model(&model.Storage{}).Where("id = ?", storage.ID).Updates(map[string]any{
-			"config":        storage.Config,
-			"client_config": storage.ClientConfig,
-		}).Error
+// UpdateStorageHandler updates the configuration of a given storage system.
+//
+// Updates are implemented as immutable configuration generations:
+//   - The storage row is locked first, so concurrent updates take effect in
+//     exactly one deterministic activation order, each merging against the
+//     freshest committed configuration.
+//   - The merged configuration is validated against the real backend before
+//     anything is committed. If handler creation or listing fails the whole
+//     transaction rolls back: the previous generation stays active and usable.
+//   - On success a new generation row is inserted and atomically marked
+//     active, the storages row is mirrored to it, and older generations without
+//     any remaining attachment/job/file/car reference are cleaned up.
+//
+// Already claimed jobs, long lived readers and in-flight service requests
+// keep using the generation they pinned until they finish; only newly started
+// operations see the new configuration.
+//
+// Parameters:
+//   - ctx: A context.Context for request-scoped values, cancellation signals, and deadlines.
+//   - db: A *gorm.DB instance for database interactions.
+//   - name: The name of the storage system to be updated.
+//   - request: The new configuration values to merge and the client config overrides.
+//
+// Returns:
+//   - A pointer to the updated storage model (mirroring the new active generation).
+//   - An error if there's an issue during the update process, otherwise nil.
+func (DefaultHandler) UpdateStorageHandler(
+	ctx context.Context,
+	db *gorm.DB,
+	name string,
+	request UpdateRequest,
+) (*model.Storage, error) {
+	var storage model.Storage
+	err := database.DoRetry(ctx, func() error {
+		return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var err error
+			storage, err = lockStorageForUpdate(ctx, tx, name)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.Wrapf(handlererror.ErrNotFound, "storage %s does not exist", name)
+			}
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			candidate, err := mergeStorageConfig(storage, request)
+			if err != nil {
+				return err
+			}
+
+			rclone, err := storagesystem.NewRCloneHandler(ctx, candidate)
+			if err != nil {
+				return errors.Join(handlererror.ErrInvalidParameter, errors.Wrap(err, "creating rclone handler failed"))
+			}
+
+			_, err = rclone.List(ctx, "")
+			if err != nil {
+				return errors.Join(handlererror.ErrInvalidParameter, errors.Wrap(err, "listing the storage failed"))
+			}
+
+			var maxVersion uint32
+			err = tx.Model(&model.StorageGeneration{}).
+				Where("storage_id = ?", storage.ID).
+				Select("COALESCE(MAX(version), 0)").Scan(&maxVersion).Error
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			generation := model.StorageGeneration{
+				StorageID:    storage.ID,
+				Version:      maxVersion + 1,
+				Name:         storage.Name,
+				Type:         candidate.Type,
+				Path:         candidate.Path,
+				Config:       candidate.Config,
+				ClientConfig: candidate.ClientConfig,
+			}
+			err = tx.Create(&generation).Error
+			if err != nil {
+				return errors.Wrap(err, "failed to create storage generation")
+			}
+
+			// atomic activation: a single pointer flip makes the new
+			// generation visible to new operations; nothing mutates old rows
+			err = tx.Model(&model.Storage{}).Where("id = ?", storage.ID).Updates(map[string]any{
+				"config":               candidate.Config,
+				"client_config":        candidate.ClientConfig,
+				"active_generation_id": generation.ID,
+				"updated_at":           time.Now(),
+			}).Error
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			if err := storagesystem.DeleteUnreferencedGenerations(ctx, tx, storage.ID); err != nil {
+				return errors.Wrap(err, "failed to clean up old storage generations")
+			}
+
+			candidate.ActiveGenerationID = &generation.ID
+			candidate.GenerationID = &generation.ID
+			storage = candidate
+			return nil
+		}, &sql.TxOptions{})
 	})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	return &storage, err
+	return &storage, nil
 }
 
 func OverrideStorageWithClientConfig(storage *model.Storage, config model.ClientConfig) {

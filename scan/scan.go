@@ -81,7 +81,7 @@ func Scan(ctx context.Context, db *gorm.DB, attachment model.SourceAttachment) e
 			continue
 		}
 
-		file, fileRanges, err := push.PushFile(ctx, db, entry.Info, attachment, directoryCache)
+		file, fileRanges, err := push.PushFile(ctx, db, entry.Info, attachment, directoryCache, attachment.Storage.GenerationID)
 		if err != nil {
 			return errors.Wrapf(err, "failed to push file %s", entry.Info.Remote())
 		}

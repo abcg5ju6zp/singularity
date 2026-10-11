@@ -103,6 +103,7 @@ func TestCARPaddingValidity(t *testing.T) {
 		require.NoError(t, err)
 
 		// Generate CAR file using current Pack() implementation
+		pinJobGenerationsForTest(t, db, &job)
 		car, err := Pack(ctx, db, job)
 		require.NoError(t, err)
 		require.NotNil(t, car)

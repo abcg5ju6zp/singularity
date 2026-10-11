@@ -11,6 +11,7 @@ import (
 	"github.com/data-preservation-programs/singularity/model"
 	"github.com/data-preservation-programs/singularity/pack"
 	"github.com/data-preservation-programs/singularity/scan"
+	"github.com/data-preservation-programs/singularity/storagesystem"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -294,6 +295,14 @@ func (DefaultHandler) PackHandler(
 		return nil, errors.WithStack(err)
 	}
 	packJob.FileRanges = fileRanges
+
+	// A manual pack is itself a claim: pin the active source generation
+	// (or reuse an existing pin) so the pack never changes backend identity
+	// mid-flight.
+	err = storagesystem.PinJobSourceGeneration(ctx, db, &packJob)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
 
 	car, err := pack.Pack(ctx, db, packJob)
 	if err != nil {

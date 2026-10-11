@@ -7,6 +7,7 @@ import (
 	"github.com/data-preservation-programs/singularity/database"
 	"github.com/data-preservation-programs/singularity/handler/handlererror"
 	"github.com/data-preservation-programs/singularity/model"
+	"github.com/data-preservation-programs/singularity/storagesystem"
 	"github.com/data-preservation-programs/singularity/util"
 	"gorm.io/gorm"
 )
@@ -50,22 +51,30 @@ func (DefaultHandler) AddSourceStorageHandler(ctx context.Context, db *gorm.DB, 
 	}
 
 	err = database.DoRetry(ctx, func() error {
-		attachment := model.SourceAttachment{
-			StorageID:     storage.ID,
-			PreparationID: preparation.ID,
-		}
-		err := db.Create(&attachment).Error
-		if err != nil {
-			return errors.WithStack(err)
-		}
+		return db.Transaction(func(tx *gorm.DB) error {
+			// record the generation active at attach time for lineage
+			generation, err := storagesystem.ActiveGeneration(ctx, tx, storage.ID)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.WithStack(err)
+			}
+			attachment := model.SourceAttachment{
+				StorageID:     storage.ID,
+				PreparationID: preparation.ID,
+			}
+			if err == nil {
+				attachment.StorageGenerationID = &generation.ID
+			}
+			if err := tx.Create(&attachment).Error; err != nil {
+				return errors.WithStack(err)
+			}
 
-		err = db.Create(&model.Directory{
-			AttachmentID: &attachment.ID,
-		}).Error
-		if err != nil {
-			return errors.WithStack(err)
-		}
-		return nil
+			if err := tx.Create(&model.Directory{
+				AttachmentID: &attachment.ID,
+			}).Error; err != nil {
+				return errors.WithStack(err)
+			}
+			return nil
+		})
 	})
 	if util.IsDuplicateKeyError(err) {
 		return nil, errors.Wrapf(handlererror.ErrDuplicateRecord, "source storage %s is already attached to preparation %s", source, id)

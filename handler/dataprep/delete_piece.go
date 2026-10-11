@@ -72,7 +72,7 @@ func (DefaultHandler) DeletePieceHandler(
 
 	// 3. Find car by piece_cid AND preparation_id
 	var car model.Car
-	err = db.Preload("Storage").
+	err = db.
 		Where("piece_cid = ? AND preparation_id = ?", model.CID(pieceCID), preparation.ID).
 		First(&car).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -120,7 +120,12 @@ func (DefaultHandler) DeletePieceHandler(
 
 	// 6. Delete physical CAR file from storage (if requested and applicable)
 	if request.DeleteCar && car.StorageID != nil && car.StoragePath != "" {
-		handler, err := storagesystem.NewRCloneHandler(ctx, *car.Storage)
+		// delete through the generation the CAR was written with
+		storage, err := storagesystem.SnapshotByRef(ctx, db, *car.StorageID, car.StorageGenerationID)
+		if err != nil {
+			return errors.Wrap(err, "failed to resolve storage generation")
+		}
+		handler, err := storagesystem.NewRCloneHandler(ctx, storage)
 		if err != nil {
 			return errors.Wrap(err, "failed to connect to storage")
 		}

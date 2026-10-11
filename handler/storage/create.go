@@ -103,13 +103,43 @@ func (DefaultHandler) CreateStorageHandler(
 		return nil, errors.Join(handlererror.ErrInvalidParameter, errors.Wrap(err, "listing the storage failed"))
 	}
 
+	var generationID model.StorageGenerationID
 	err = database.DoRetry(ctx, func() error {
-		return db.Create(&storage).Error
+		return db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&storage).Error; err != nil {
+				return err
+			}
+			// The first immutable generation; creation and activation happen in
+			// the same transaction, so a storage never exists without an
+			// active generation.
+			generation := model.StorageGeneration{
+				StorageID:    storage.ID,
+				Version:      1,
+				Name:         storage.Name,
+				Type:         storage.Type,
+				Path:         storage.Path,
+				Config:       storage.Config,
+				ClientConfig: storage.ClientConfig,
+			}
+			if err := tx.Create(&generation).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&model.Storage{}).Where("id = ?", storage.ID).
+				Update("active_generation_id", generation.ID).Error; err != nil {
+				return err
+			}
+			generationID = generation.ID
+			return nil
+		})
 	})
 
 	if util.IsDuplicateKeyError(err) {
 		return nil, errors.Wrapf(handlererror.ErrDuplicateRecord, "storage with name %s already exists", name)
 	}
 
+	if err == nil {
+		storage.ActiveGenerationID = &generationID
+		storage.GenerationID = &generationID
+	}
 	return &storage, err
 }

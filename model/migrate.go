@@ -16,6 +16,7 @@ var Tables = []any{
 	&Global{},
 	&Preparation{},
 	&Storage{},
+	&StorageGeneration{},
 	&OutputAttachment{},
 	&SourceAttachment{},
 	&Job{},
@@ -158,6 +159,13 @@ func AutoMigrate(db *gorm.DB) error {
 		return errors.Wrap(err, "failed to migrate wallet assignments")
 	}
 
+	// Introduce immutable storage configuration generations: snapshot every
+	// pre-existing storage row as its active v1 generation and pin all
+	// existing references to it.
+	if err := backfillStorageGenerations(db); err != nil {
+		return errors.Wrap(err, "failed to backfill storage generations")
+	}
+
 	return nil
 }
 
@@ -223,6 +231,7 @@ func migrateFKConstraints(db *gorm.DB) error {
 var sequenceTables = []string{
 	"preparations",
 	"storages",
+	"storage_generations",
 	"output_attachments",
 	"source_attachments",
 	"jobs",

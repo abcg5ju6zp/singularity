@@ -51,7 +51,14 @@ func (DefaultHandler) PushFileHandler(
 		return nil, errors.WithStack(err)
 	}
 
-	rclone, err := storagesystem.NewRCloneHandler(ctx, *attachment.Storage)
+	// A manual push is a newly started operation: use the generation
+	// that is active now, not the one the attachment was created with.
+	snapshot, err := storagesystem.ActiveSnapshot(ctx, db, attachment.StorageID)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	rclone, err := storagesystem.NewRCloneHandler(ctx, snapshot)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -66,7 +73,7 @@ func (DefaultHandler) PushFileHandler(
 		return nil, errors.Wrapf(handlererror.ErrInvalidParameter, "file '%s' is not an object", fileInfo.Path)
 	}
 
-	file, fileRanges, err := push.PushFile(ctx, db, obj, attachment, map[string]model.DirectoryID{})
+	file, fileRanges, err := push.PushFile(ctx, db, obj, attachment, map[string]model.DirectoryID{}, snapshot.GenerationID)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

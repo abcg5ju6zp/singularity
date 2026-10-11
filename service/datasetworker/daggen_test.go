@@ -73,6 +73,8 @@ func TestExportDag(t *testing.T) {
 		err := thread.dbNoContext.Create(&job).Error
 		require.NoError(t, err)
 
+		pinDagJobGenerations(t, db, &job)
+
 		dir1 := daggen.NewDirectoryData()
 		dir1.AddBlocks(ctx, []blocks.Block{
 			blocks.NewBlock([]byte("hello")),
@@ -137,6 +139,8 @@ func TestExportDag_WithOutputStorage_NoInline(t *testing.T) {
 		}
 		err := thread.dbNoContext.Create(&job).Error
 		require.NoError(t, err)
+
+		pinDagJobGenerations(t, db, &job)
 
 		dir1 := daggen.NewDirectoryData()
 		dir1.AddBlocks(ctx, []blocks.Block{
@@ -204,6 +208,8 @@ func TestExportDag_WithMinPieceSize_LocalStorage(t *testing.T) {
 		}
 		err := thread.dbNoContext.Create(&job).Error
 		require.NoError(t, err)
+
+		pinDagJobGenerations(t, db, &job)
 
 		// Create a small DAG that will need padding
 		dir1 := daggen.NewDirectoryData()
@@ -299,6 +305,8 @@ func TestExportDag_WithMinPieceSize_RemoteStorage(t *testing.T) {
 		}
 		err := thread.dbNoContext.Create(&job).Error
 		require.NoError(t, err)
+
+		pinDagJobGenerations(t, db, &job)
 
 		// Create a small DAG that will need padding
 		dir1 := daggen.NewDirectoryData()

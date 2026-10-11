@@ -7,6 +7,7 @@ import (
 	"github.com/data-preservation-programs/singularity/database"
 	"github.com/data-preservation-programs/singularity/handler/handlererror"
 	"github.com/data-preservation-programs/singularity/model"
+	"github.com/data-preservation-programs/singularity/storagesystem"
 	"github.com/data-preservation-programs/singularity/util"
 	"github.com/rjNemo/underscore"
 	"gorm.io/gorm"
@@ -50,10 +51,21 @@ func (DefaultHandler) AddOutputStorageHandler(ctx context.Context, db *gorm.DB, 
 	}
 
 	err = database.DoRetry(ctx, func() error {
-		return db.Create(&model.OutputAttachment{
-			StorageID:     storage.ID,
-			PreparationID: preparation.ID,
-		}).Error
+		return db.Transaction(func(tx *gorm.DB) error {
+			// record the generation active at attach time for lineage
+			generation, err := storagesystem.ActiveGeneration(ctx, tx, storage.ID)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.WithStack(err)
+			}
+			attachment := model.OutputAttachment{
+				StorageID:     storage.ID,
+				PreparationID: preparation.ID,
+			}
+			if err == nil {
+				attachment.StorageGenerationID = &generation.ID
+			}
+			return tx.Create(&attachment).Error
+		})
 	})
 	if util.IsDuplicateKeyError(err) {
 		return nil, errors.Wrapf(handlererror.ErrDuplicateRecord, "output storage %s is already attached to preparation %s", output, id)

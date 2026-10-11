@@ -7,12 +7,17 @@ import (
 	"github.com/data-preservation-programs/singularity/database"
 	"github.com/data-preservation-programs/singularity/handler/handlererror"
 	"github.com/data-preservation-programs/singularity/model"
+	"github.com/data-preservation-programs/singularity/storagesystem"
 	"gorm.io/gorm"
 )
 
 // RemoveHandler deletes the storage entry with the specified name from the database.
-// Before deletion, it checks if any attachments are still using the storage,
-// and if so, returns an error.
+//
+// A storage can only be removed if none of its generations is still referenced
+// by attachments, jobs, scanned files or written cars -- a delete is therefore
+// refused not just while the storage is attached to a preparation, but also
+// when orphaned jobs/files/CARs from deleted preparations still pin one of its
+// generations. The check and the deletion run in one transaction.
 //
 // Parameters:
 //   - ctx: The context for database transactions and other operations.
@@ -29,9 +34,9 @@ func (DefaultHandler) RemoveHandler(
 ) error {
 	db = db.WithContext(ctx)
 	err := database.DoRetry(ctx, func() error {
-		return db.Transaction(func(db *gorm.DB) error {
+		return db.Transaction(func(tx *gorm.DB) error {
 			var storage model.Storage
-			err := storage.FindByIDOrName(db, name)
+			err := storage.FindByIDOrName(tx, name)
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errors.Wrapf(handlererror.ErrNotFound, "storage %s does not exist", name)
 			}
@@ -39,23 +44,22 @@ func (DefaultHandler) RemoveHandler(
 				return errors.WithStack(err)
 			}
 
-			var sourceCount int64
-			var outputCount int64
-			err = db.Model(&model.SourceAttachment{}).Where("storage_id = ?", storage.ID).Count(&sourceCount).Error
+			inUse, err := storagesystem.StorageHasGenerationReferences(ctx, tx, storage.ID)
 			if err != nil {
 				return errors.WithStack(err)
 			}
-			err = db.Model(&model.OutputAttachment{}).Where("storage_id = ?", storage.ID).Count(&outputCount).Error
-			if err != nil {
-				return errors.WithStack(err)
-			}
-
-			if sourceCount > 0 || outputCount > 0 {
+			if inUse {
 				return errors.Wrapf(handlererror.ErrInvalidParameter, "storage %s is still in use", name)
 			}
 
-			err = db.Delete(&storage).Error
-			if err != nil {
+			// all generations are unreferenced; remove them before the
+			// storage row (the generations -> storage FK is RESTRICT)
+			if err := tx.Where("storage_id = ?", storage.ID).
+				Delete(&model.StorageGeneration{}).Error; err != nil {
+				return errors.WithStack(err)
+			}
+
+			if err := tx.Delete(&storage).Error; err != nil {
 				return errors.WithStack(err)
 			}
 			return nil

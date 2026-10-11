@@ -153,25 +153,25 @@ func TestGetRandomOutputWriter(t *testing.T) {
 		},
 	}
 	t.Run("no storages", func(t *testing.T) {
-		id, writer, err := GetRandomOutputWriter(ctx, []model.Storage{})
+		id, _, writer, err := GetRandomOutputWriter(ctx, []model.Storage{})
 		require.NoError(t, err)
 		require.Nil(t, id)
 		require.Nil(t, writer)
 	})
 	t.Run("single local storage", func(t *testing.T) {
-		id, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s1})
+		id, _, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s1})
 		require.NoError(t, err)
 		require.EqualValues(t, 1, *id)
 		require.NotNil(t, writer)
 	})
 	t.Run("single s3 storage", func(t *testing.T) {
-		id, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s3})
+		id, _, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s3})
 		require.NoError(t, err)
 		require.EqualValues(t, 3, *id)
 		require.NotNil(t, writer)
 	})
 	t.Run("all storage", func(t *testing.T) {
-		_, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s1, s2, s3})
+		_, _, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s1, s2, s3})
 		require.NoError(t, err)
 		require.NotNil(t, writer)
 	})
@@ -182,7 +182,7 @@ func TestGetRandomOutputWriter(t *testing.T) {
 			freeSpaceWarningThreshold = current
 		}()
 
-		id, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s1})
+		id, _, writer, err := GetRandomOutputWriter(ctx, []model.Storage{s1})
 		require.NoError(t, err)
 		require.EqualValues(t, 1, *id)
 		require.NotNil(t, writer)
@@ -194,7 +194,7 @@ func TestGetRandomOutputWriter(t *testing.T) {
 			freeSpaceErrorThreshold = current
 		}()
 
-		_, _, err := GetRandomOutputWriter(ctx, []model.Storage{s1})
+		_, _, _, err := GetRandomOutputWriter(ctx, []model.Storage{s1})
 		require.ErrorIs(t, err, ErrStorageNotAvailable)
 	})
 }

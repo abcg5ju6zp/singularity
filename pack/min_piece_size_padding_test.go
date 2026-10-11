@@ -112,6 +112,7 @@ func TestMinPieceSizePaddingDetection(t *testing.T) {
 					err = db.Preload("FileRanges.File").Preload("Attachment.Preparation.OutputStorages").Preload("Attachment.Storage").First(&job, job.ID).Error
 					require.NoError(t, err)
 
+					pinJobGenerationsForTest(t, db, &job)
 					car, err := Pack(ctx, db, job)
 					require.NoError(t, err)
 					require.NotNil(t, car)
@@ -188,6 +189,7 @@ func TestMinPieceSizePaddingDetection(t *testing.T) {
 					err = db.Preload("FileRanges.File").Preload("Attachment.Preparation").Preload("Attachment.Storage").First(&job, job.ID).Error
 					require.NoError(t, err)
 
+					pinJobGenerationsForTest(t, db, &job)
 					car, err := Pack(ctx, db, job)
 					require.NoError(t, err)
 					require.NotNil(t, car)
@@ -280,6 +282,7 @@ func TestPieceReaderServesZeros(t *testing.T) {
 		err = db.Preload("FileRanges.File").Preload("Attachment.Preparation").Preload("Attachment.Storage").First(&job, job.ID).Error
 		require.NoError(t, err)
 
+		pinJobGenerationsForTest(t, db, &job)
 		car, err := Pack(ctx, db, job)
 		require.NoError(t, err)
 		require.NotNil(t, car)
@@ -404,6 +407,7 @@ func TestMinPieceSizePaddingFileIntegrity(t *testing.T) {
 		err = db.Preload("FileRanges.File").Preload("Attachment.Preparation.OutputStorages").Preload("Attachment.Storage").First(&job, job.ID).Error
 		require.NoError(t, err)
 
+		pinJobGenerationsForTest(t, db, &job)
 		car, err := Pack(ctx, db, job)
 		require.NoError(t, err)
 		require.NotNil(t, car)
@@ -541,6 +545,7 @@ func TestDownloadPaddedPiece(t *testing.T) {
 				require.NoError(t, err)
 
 				// Pack the file
+				pinJobGenerationsForTest(t, db, &job)
 				car, err := Pack(ctx, db, job)
 				require.NoError(t, err)
 				require.NotNil(t, car)

@@ -60,15 +60,25 @@ func (DefaultHandler) RetrieveFileHandler(
 ) (data io.ReadSeekCloser, name string, modTime time.Time, err error) {
 	db = db.WithContext(ctx)
 	var file model.File
-	err = db.Preload("Attachment.Storage").First(&file, id).Error
+	// need the attachment for its storage id; the backend itself is
+	// resolved through the generation the file was scanned with
+	err = db.Preload("Attachment").First(&file, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, "", time.Time{}, errors.Wrapf(handlererror.ErrNotFound, "file '%d' does not exist", id)
 	}
 	if err != nil {
 		return nil, "", time.Time{}, errors.WithStack(err)
 	}
+	if file.Attachment == nil {
+		return nil, "", time.Time{}, errors.Wrapf(handlererror.ErrNotFound, "file '%d' has no source attachment", id)
+	}
 
-	rclone, err := storagesystem.NewRCloneHandler(ctx, *file.Attachment.Storage)
+	storage, err := storagesystem.SnapshotByRef(ctx, db, file.Attachment.StorageID, file.StorageGenerationID)
+	if err != nil {
+		return nil, "", time.Time{}, errors.WithStack(err)
+	}
+
+	rclone, err := storagesystem.NewRCloneHandler(ctx, storage)
 	if err != nil {
 		return nil, file.FileName(), time.Unix(0, file.LastModifiedNano), errors.WithStack(err)
 	}

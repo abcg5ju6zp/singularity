@@ -92,16 +92,21 @@ func Pack(
 ) (*model.Car, error) {
 	db = db.WithContext(ctx)
 	pieceSize := job.Attachment.Preparation.GetMinPieceSize()
+	// output selection is a new operation: resolve the generations active now
+	outputSnapshots, err := storagesystem.ActiveSnapshots(ctx, db, job.Attachment.Preparation.OutputStorages)
+	if err != nil {
+		return nil, err
+	}
 	// storageWriter can be nil for inline preparation
-	storageID, storageWriter, err := storagesystem.GetRandomOutputWriter(ctx, job.Attachment.Preparation.OutputStorages)
+	storageID, outputGenerationID, storageWriter, err := storagesystem.GetRandomOutputWriter(ctx, outputSnapshots)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	storageReader, err := storagesystem.NewRCloneHandler(ctx, *job.Attachment.Storage)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get storage handler for %s", job.Attachment.Storage.Name)
-	}
+	// job.Attachment.Storage is the immutable generation snapshot pinned at
+	// claim; the reader additionally routes each file to the exact
+	// generation its file version was scanned under.
+	storageReader := storagesystem.NewGenerationFileReader(ctx, db, *job.Attachment.Storage)
 
 	var skipInaccessibleFile bool
 	if job.Attachment.Storage.ClientConfig.SkipInaccessibleFile != nil {
@@ -265,6 +270,7 @@ func Pack(
 		FileSize:            fileSize,
 		MinPieceSizePadding: minPieceSizePadding,
 		StorageID:           storageID,
+		StorageGenerationID: outputGenerationID,
 		StoragePath:         filename,
 		AttachmentID:        job.AttachmentID,
 		PreparationID:       &job.Attachment.PreparationID,

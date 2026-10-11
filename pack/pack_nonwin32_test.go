@@ -54,6 +54,7 @@ func TestAssembleCar_InaccessibleFile(t *testing.T) {
 		}
 		err := db.Create(&job).Error
 		require.NoError(t, err)
+		pinJobGenerationsForTest(t, db, &job)
 		_, err = Pack(ctx, db, job)
 		require.ErrorContains(t, err, "failed to open")
 	})
@@ -93,6 +94,7 @@ func TestAssembleCar_InaccessibleFile(t *testing.T) {
 		}
 		err := db.Create(&job).Error
 		require.NoError(t, err)
+		pinJobGenerationsForTest(t, db, &job)
 		_, err = Pack(ctx, db, job)
 		require.ErrorIs(t, err, ErrNoContent)
 	})

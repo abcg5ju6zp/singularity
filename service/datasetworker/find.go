@@ -7,6 +7,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/data-preservation-programs/singularity/database"
 	"github.com/data-preservation-programs/singularity/model"
+	"github.com/data-preservation-programs/singularity/storagesystem"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -63,10 +64,23 @@ func (w *Thread) findJob(ctx context.Context, typesOrdered []model.JobType) (*mo
 					return errors.WithStack(err)
 				}
 
+				// Pin the source storage generation this claim runs under.
+				// First claims pin the active generation; retries (delayed
+				// error/ready cycles, stale-worker sweeps after a crash or restart)
+				// keep the pin recorded on the job.
+				pinnedGeneration, err := storagesystem.ClaimJobGeneration(ctx, db, &job)
+				if err != nil {
+					return errors.WithStack(err)
+				}
+
 				// Now load the associations we need
 				err = db.Preload("Attachment.Preparation.OutputStorages").Preload("Attachment.Storage").
 					First(&job, job.ID).Error
-				return errors.WithStack(err)
+				if err != nil {
+					return errors.WithStack(err)
+				}
+				storagesystem.ApplyJobSnapshot(&job, pinnedGeneration)
+				return nil
 			}, txOpts)
 		})
 		if err != nil {

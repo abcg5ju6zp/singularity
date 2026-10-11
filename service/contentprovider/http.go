@@ -164,7 +164,31 @@ func getPieceMetadata(ctx context.Context, db *gorm.DB, car model.Car) (*PieceMe
 	db = db.WithContext(ctx)
 
 	var attachment model.SourceAttachment
-	err := db.Model(&car).Preload("Storage").Association("Attachment").Find(&attachment)
+	err := db.Model(&car).Association("Attachment").Find(&attachment)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	// Resolve the source storage through the generation the piece's data was
+	// actually produced with: the pack job's pinned generation for data pieces,
+	// else the generation pinned when the source was attached. Inline piece
+	// readers (this host and the download server via the metadata payload)
+	// therefore keep using the exact backend the files were scanned with.
+	var sourceGenerationID *model.StorageGenerationID
+	if car.JobID != nil {
+		var job model.Job
+		err = db.Select("source_generation_id").First(&job, *car.JobID).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.WithStack(err)
+		}
+		if err == nil {
+			sourceGenerationID = job.SourceGenerationID
+		}
+	}
+	if sourceGenerationID == nil {
+		sourceGenerationID = attachment.StorageGenerationID
+	}
+	storage, err := storagesystem.SnapshotByRef(ctx, db, attachment.StorageID, sourceGenerationID)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -181,7 +205,7 @@ func getPieceMetadata(ctx context.Context, db *gorm.DB, car model.Car) (*PieceMe
 	}
 	return &PieceMetadata{
 		Car:       car,
-		Storage:   *attachment.Storage,
+		Storage:   storage,
 		CarBlocks: carBlocks,
 		Files:     files,
 	}, nil
@@ -312,7 +336,7 @@ func (s *HTTPServer) findPiece(ctx context.Context, pieceCid cid.Cid) (
 ) {
 	db := s.dbNoContext.WithContext(ctx)
 	var cars []model.Car
-	err := db.Preload("Storage").Where("piece_cid = ?", model.CID(pieceCid)).Find(&cars).Error
+	err := db.Where("piece_cid = ?", model.CID(pieceCid)).Find(&cars).Error
 	if err != nil {
 		return nil, time.Time{}, errors.WithStack(err)
 	}
@@ -327,10 +351,16 @@ func (s *HTTPServer) findPiece(ctx context.Context, pieceCid cid.Cid) (
 			continue
 		}
 
-		if car.Storage != nil {
-			rclone, err := storagesystem.NewRCloneHandler(ctx, *car.Storage)
+		if car.StorageID != nil {
+			// serve the CAR through the generation it was written with
+			storage, err := storagesystem.SnapshotByRef(ctx, db, *car.StorageID, car.StorageGenerationID)
 			if err != nil {
-				errs = append(errs, errors.Wrapf(err, "failed to create rclone handler with storage %d", car.Storage.ID))
+				errs = append(errs, errors.Wrapf(err, "failed to resolve storage generation for storage %d", *car.StorageID))
+				continue
+			}
+			rclone, err := storagesystem.NewRCloneHandler(ctx, storage)
+			if err != nil {
+				errs = append(errs, errors.Wrapf(err, "failed to create rclone handler with storage %d", *car.StorageID))
 				continue
 			}
 			seeker, obj, err := storagesystem.Open(rclone, ctx, car.StoragePath)

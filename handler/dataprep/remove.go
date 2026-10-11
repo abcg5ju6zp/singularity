@@ -2,6 +2,7 @@ package dataprep
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cockroachdb/errors"
 	"github.com/data-preservation-programs/singularity/database"
@@ -47,7 +48,7 @@ func (DefaultHandler) RemovePreparationHandler(ctx context.Context, db *gorm.DB,
 
 	var cars []model.Car
 	if request.RemoveCars {
-		err = db.Preload("Storage").Where("preparation_id = ?", preparation.ID).Find(&cars).Error
+		err = db.Where("preparation_id = ?", preparation.ID).Find(&cars).Error
 		if err != nil {
 			return errors.WithStack(err)
 		}
@@ -65,21 +66,30 @@ func (DefaultHandler) RemovePreparationHandler(ctx context.Context, db *gorm.DB,
 		return errors.WithStack(err)
 	}
 
-	storageHandlers := make(map[model.StorageID]storagesystem.Handler)
+	storageHandlers := make(map[string]storagesystem.Handler)
 	var errs []error
 	for _, car := range cars {
 		if car.StorageID == nil {
 			continue
 		}
-		handler, ok := storageHandlers[*car.StorageID]
+		// every car is deleted through the generation it was written with
+		handlerKey := fmt.Sprintf("s%d", *car.StorageID)
+		if car.StorageGenerationID != nil {
+			handlerKey = fmt.Sprintf("g%d", *car.StorageGenerationID)
+		}
+		handler, ok := storageHandlers[handlerKey]
 		if !ok {
-			var err error
-			handler, err = storagesystem.NewRCloneHandler(ctx, *car.Storage)
+			storage, err := storagesystem.SnapshotByRef(ctx, db, *car.StorageID, car.StorageGenerationID)
+			if err != nil {
+				errs = append(errs, errors.Wrap(err, "Unable to resolve storage generation"))
+				continue
+			}
+			handler, err = storagesystem.NewRCloneHandler(ctx, storage)
 			if err != nil {
 				errs = append(errs, errors.Wrapf(err, "Unable to create rclone handler"))
 				continue
 			}
-			storageHandlers[*car.StorageID] = handler
+			storageHandlers[handlerKey] = handler
 		}
 		entry, err := handler.Check(ctx, car.StoragePath)
 		if err != nil {

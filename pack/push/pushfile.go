@@ -52,6 +52,7 @@ func PushFile(
 	obj fs.ObjectInfo,
 	attachment model.SourceAttachment,
 	directoryCache map[string]model.DirectoryID,
+	sourceGenerationID *model.StorageGenerationID,
 ) (*model.File, []model.FileRange, error) {
 	logger.Debugw("pushing file", "file", obj.Remote(), "preparation", attachment.PreparationID, "storage", attachment.StorageID)
 	db = db.WithContext(ctx)
@@ -89,11 +90,12 @@ func PushFile(
 	}
 
 	file := model.File{
-		AttachmentID:     &attachment.ID,
-		Path:             obj.Remote(),
-		Size:             size,
-		LastModifiedNano: lastModified.UnixNano(),
-		Hash:             hashValue,
+		AttachmentID:        &attachment.ID,
+		Path:                obj.Remote(),
+		Size:                size,
+		LastModifiedNano:    lastModified.UnixNano(),
+		Hash:                hashValue,
+		StorageGenerationID: sourceGenerationID,
 	}
 
 	logger.Debugw("new file", "file", file)

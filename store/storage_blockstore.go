@@ -75,14 +75,14 @@ type StorageBlockStore struct {
 	cfg         SpanConfig
 
 	handlersMu sync.RWMutex
-	handlers   map[model.StorageID]*storagesystem.RCloneHandler
+	handlers   map[storageHandlerKey]*storagesystem.RCloneHandler
 
 	cache    *lru.Cache[string, []byte]
 	inflight singleflight.Group
 	sem      chan struct{}
 
 	// seq tracks, per file, the offset window in which the next cache miss
-	// counts as a sequential continuation. Entries are disposable hints.
+	// counts as a sequential continuation. entries are disposable hints.
 	seqMu sync.Mutex
 	seq   map[model.FileID]seqWindow
 
@@ -91,6 +91,24 @@ type StorageBlockStore struct {
 	// that happened to trigger it. Close cancels it.
 	bg     context.Context
 	cancel context.CancelFunc
+}
+
+// storageHandlerKey pins the rclone handler cache to an immutable generation
+// rather than a storage identity. After a storage update, new reads build a
+// handler for the new generation while long lived readers keep using the
+// handler they started with. generationID 0 keys the fallback for unversioned
+// (legacy/test fixture) storages.
+type storageHandlerKey struct {
+	generationID model.StorageGenerationID
+	storageID    model.StorageID
+}
+
+func handlerKeyFor(storage model.Storage) storageHandlerKey {
+	key := storageHandlerKey{storageID: storage.ID}
+	if storage.GenerationID != nil {
+		key.generationID = *storage.GenerationID
+	}
+	return key
 }
 
 type seqWindow struct {
@@ -107,7 +125,7 @@ func NewStorageBlockStore(db *gorm.DB, cfg SpanConfig) *StorageBlockStore {
 	return &StorageBlockStore{
 		dbNoContext: db,
 		cfg:         cfg,
-		handlers:    make(map[model.StorageID]*storagesystem.RCloneHandler),
+		handlers:    make(map[storageHandlerKey]*storagesystem.RCloneHandler),
 		cache:       cache,
 		sem:         make(chan struct{}, cfg.MaxBackendReads),
 		seq:         make(map[model.FileID]seqWindow),
@@ -133,7 +151,7 @@ func (s *StorageBlockStore) Get(ctx context.Context, c cid.Cid) (blocks.Block, e
 
 	var carBlock model.CarBlock
 	err := s.dbNoContext.WithContext(ctx).
-		Joins("File.Attachment.Storage").
+		Joins("File.Attachment").
 		Where("car_blocks.cid = ?", model.CID(c)).
 		First(&carBlock).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -152,11 +170,16 @@ func (s *StorageBlockStore) Get(ctx context.Context, c cid.Cid) (blocks.Block, e
 }
 
 func (s *StorageBlockStore) readFileBlock(ctx context.Context, carBlock model.CarBlock, c cid.Cid) (blocks.Block, error) {
-	if carBlock.File == nil || carBlock.File.Attachment == nil || carBlock.File.Attachment.Storage == nil {
+	if carBlock.File == nil || carBlock.File.Attachment == nil {
 		return nil, errors.Errorf("block %s has no associated storage (orphaned or deleted source file)", c)
 	}
 	file := *carBlock.File
-	storage := *carBlock.File.Attachment.Storage
+	// resolve the exact generation the file version was scanned under;
+	// nil pins (legacy rows) fall back to the active generation
+	storage, err := storagesystem.SnapshotByRef(ctx, s.dbNoContext, carBlock.File.Attachment.StorageID, carBlock.File.StorageGenerationID)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
 
 	blks, end, err := s.fetchSpan(ctx, file, storage, carBlock.FileOffset)
 	if err != nil {
@@ -355,8 +378,9 @@ func (s *StorageBlockStore) maybePrefetch(file model.File, storage model.Storage
 }
 
 func (s *StorageBlockStore) getHandler(storage model.Storage) (*storagesystem.RCloneHandler, error) {
+	key := handlerKeyFor(storage)
 	s.handlersMu.RLock()
-	h, ok := s.handlers[storage.ID]
+	h, ok := s.handlers[key]
 	s.handlersMu.RUnlock()
 	if ok {
 		return h, nil
@@ -364,14 +388,14 @@ func (s *StorageBlockStore) getHandler(storage model.Storage) (*storagesystem.RC
 
 	s.handlersMu.Lock()
 	defer s.handlersMu.Unlock()
-	if h, ok := s.handlers[storage.ID]; ok {
+	if h, ok := s.handlers[key]; ok {
 		return h, nil
 	}
 	h, err := storagesystem.NewRCloneHandler(s.bg, storage)
 	if err != nil {
 		return nil, err
 	}
-	s.handlers[storage.ID] = h
+	s.handlers[key] = h
 	return h, nil
 }
 

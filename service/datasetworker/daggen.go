@@ -191,8 +191,13 @@ func (w *Thread) ExportDag(ctx context.Context, job model.Job) error {
 
 	db := w.dbNoContext.WithContext(ctx)
 	pieceSize := job.Attachment.Preparation.GetMinPieceSize()
+	// output selection is a new operation: resolve the generations active now
+	outputSnapshots, err := storagesystem.ActiveSnapshots(ctx, db, job.Attachment.Preparation.OutputStorages)
+	if err != nil {
+		return errors.WithStack(err)
+	}
 	// storageWriter can be nil for inline preparation
-	storageID, storageWriter, err := storagesystem.GetRandomOutputWriter(ctx, job.Attachment.Preparation.OutputStorages)
+	storageID, outputGenerationID, storageWriter, err := storagesystem.GetRandomOutputWriter(ctx, outputSnapshots)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -348,6 +353,7 @@ func (w *Thread) ExportDag(ctx context.Context, job model.Job) error {
 		FileSize:            fileSize,
 		MinPieceSizePadding: minPieceSizePadding,
 		StorageID:           storageID,
+		StorageGenerationID: outputGenerationID,
 		StoragePath:         filename,
 		AttachmentID:        job.AttachmentID,
 		PreparationID:       &job.Attachment.PreparationID,
