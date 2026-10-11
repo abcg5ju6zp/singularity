@@ -528,6 +528,10 @@ func httpResponseFromError(c echo.Context, e error) error {
 		httpStatusCode = http.StatusConflict
 	}
 
+	if errors.Is(e, handlererror.ErrConflict) {
+		httpStatusCode = http.StatusConflict
+	}
+
 	logger.Errorf("%+v", e)
 	return c.JSON(httpStatusCode, HTTPError{Err: e.Error()})
 }

@@ -93,6 +93,18 @@ func (DefaultHandler) SendManualHandler(
 	if pieceCID.Type() != cid.FilCommitmentUnsealed {
 		return nil, errors.Wrapf(handlererror.ErrInvalidParameter, "piece CID %s must be commp", request.PieceCID)
 	}
+	// Refuse to attach a new deal to a piece that is frozen for deletion.
+	var frozenCount int64
+	err = db.Model(&model.Car{}).
+		Where("piece_cid = ? AND delete_state <> ?", model.CID(pieceCID), model.PieceDeletionNone).
+		Count(&frozenCount).Error
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if frozenCount > 0 {
+		return nil, errors.Wrapf(handlererror.ErrInvalidParameter,
+			"piece %s is being deleted and cannot accept new deals", request.PieceCID)
+	}
 	pieceSize, err := humanize.ParseBytes(request.PieceSize)
 	if err != nil {
 		return nil, errors.Wrapf(handlererror.ErrInvalidParameter, "invalid piece size: %s", request.PieceSize)

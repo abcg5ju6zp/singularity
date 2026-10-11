@@ -161,3 +161,24 @@ func TestAddPieceHandler(t *testing.T) {
 		}
 	})
 }
+
+// TestAddPieceHandler_FrozenPieceRejected verifies copying metadata from a
+// piece frozen for deletion into another preparation is rejected.
+func TestAddPieceHandler_FrozenPieceRejected(t *testing.T) {
+	testutil.All(t, func(ctx context.Context, t *testing.T, db *gorm.DB) {
+		require.NoError(t, db.Create(&model.Preparation{Name: "frozen-prep"}).Error)
+		pieceCID := testPieceCID("addpiece-frozen")
+		require.NoError(t, db.Create(&model.Car{
+			PieceCID:    model.CID(pieceCID),
+			PieceType:   model.DataPiece,
+			DeleteState: model.PieceDeletionPending,
+		}).Error)
+
+		_, err := Default.AddPieceHandler(ctx, db, "frozen-prep", AddPieceRequest{
+			PieceCID:  pieceCID.String(),
+			PieceSize: "1024",
+		})
+		require.ErrorIs(t, err, handlererror.ErrInvalidParameter)
+		require.ErrorContains(t, err, "being deleted")
+	})
+}

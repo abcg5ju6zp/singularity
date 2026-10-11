@@ -217,6 +217,16 @@ func (d *DealPusher) runDDOSchedule(ctx context.Context, schedule *model.Schedul
 			}
 		}
 
+		// Re-check the frozen state before payments/allocations so pieces
+		// frozen after selection neither get allocations nor new deals.
+		cars, err = filterFrozenCars(db, ctx, cars, schedule.ID)
+		if err != nil {
+			return model.ScheduleError, errors.Wrap(err, "failed to verify piece deletion states")
+		}
+		if len(cars) == 0 {
+			continue
+		}
+
 		// build piece submissions
 		pieces := make([]DDOPieceSubmission, len(cars))
 		for i, car := range cars {
@@ -342,7 +352,8 @@ func (d *DealPusher) findDDOCars(
 		if d.maxReplicas > 0 && !schedule.Force {
 			query = query.Where("piece_cid NOT IN (?)", overReplicatedCIDs)
 		}
-		return query
+		// Never schedule pieces frozen for deletion.
+		return query.Where("delete_state = ?", model.PieceDeletionNone)
 	}
 
 	if len(allowedPieceCIDs) == 0 {

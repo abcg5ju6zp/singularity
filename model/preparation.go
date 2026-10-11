@@ -2,6 +2,8 @@ package model
 
 import (
 	"context"
+	"database/sql/driver"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,71 @@ const (
 	DataPiece PieceType = "data"
 	DagPiece  PieceType = "dag"
 )
+
+// PieceDeletionState tracks the lifecycle of a piece (Car) deletion so that
+// external CAR file removal and database index removal can never diverge.
+//
+// A non-empty state "freezes" the piece: the deletion generation is captured
+// in DeleteManifest, exactly one owner may advance it, and other flows (deal
+// scheduling, preparation CAR removal, orphan reaping) leave it alone.
+type PieceDeletionState string
+
+const (
+	// PieceDeletionNone means the piece is not being deleted.
+	PieceDeletionNone PieceDeletionState = ""
+	// PieceDeletionDeleting means a deletion generation has been frozen and
+	// its owner is actively advancing it.
+	PieceDeletionDeleting PieceDeletionState = "deleting"
+	// PieceDeletionPending means the last attempt could not be confirmed:
+	// either the external object removal result was uncertain/failed, or the
+	// database phase failed. The piece and its indexes remain queryable and a
+	// new delete invocation (or the healthcheck for orphaned pieces) resumes
+	// from the frozen manifest.
+	PieceDeletionPending PieceDeletionState = "pending"
+)
+
+// ErrInvalidPieceDeletionManifest is returned when the persisted deletion
+// manifest cannot be scanned from the database.
+var ErrInvalidPieceDeletionManifest = errors.New("invalid piece deletion manifest entry in the database")
+
+// PieceDeletionManifest is the generation snapshot captured when a piece
+// deletion starts. It allows the deletion to resume (process restart,
+// duplicate request, database phase failure, or concurrent preparation
+// removal) using exactly the same Deal/CarBlock/FileRange/Directory and
+// external storage view that was frozen up front.
+type PieceDeletionManifest struct {
+	FrozenAt      time.Time           `json:"frozenAt"`
+	DeleteCar     bool                `json:"deleteCar"`
+	PieceType     PieceType           `json:"pieceType"`
+	PreparationID *PreparationID      `json:"preparationId,omitempty"`
+	StorageID     *StorageID          `json:"storageId,omitempty"`
+	StoragePath   string              `json:"storagePath,omitempty"`
+	JobID         *JobID              `json:"jobId,omitempty"`
+	AttachmentID  *SourceAttachmentID `json:"attachmentId,omitempty"`
+	// DealIDs are the deals that referenced the piece at freeze time.
+	DealIDs []DealID `json:"dealIds"`
+	// CarBlockCount is the number of car_blocks frozen for the piece; it is
+	// used to confirm the finalize phase removes the whole generation.
+	CarBlockCount int64 `json:"carBlockCount"`
+}
+
+// Value implements driver.Valuer, persisting the manifest as JSON.
+func (m PieceDeletionManifest) Value() (driver.Value, error) {
+	return json.Marshal(m)
+}
+
+// Scan implements sql.Scanner, restoring the manifest from its JSON column.
+func (m *PieceDeletionManifest) Scan(src any) error {
+	if src == nil {
+		*m = PieceDeletionManifest{}
+		return nil
+	}
+	source, ok := src.([]byte)
+	if !ok {
+		return ErrInvalidPieceDeletionManifest
+	}
+	return errors.Wrap(json.Unmarshal(source, m), "failed to unmarshal piece deletion manifest")
+}
 
 type Worker struct {
 	ID            string     `gorm:"primaryKey"    json:"id"`
@@ -279,6 +346,18 @@ type Car struct {
 	Attachment    *SourceAttachment   `cbor:"-" gorm:"foreignKey:AttachmentID;constraint:OnDelete:SET NULL"  json:"attachment,omitempty"  swaggerignore:"true" table:"-"`
 	JobID         *JobID              `cbor:"-" gorm:"index"                                                 json:"jobId,omitempty"       table:"-"`
 	Job           *Job                `cbor:"-" gorm:"foreignKey:JobID;constraint:OnDelete:SET NULL"         json:"job,omitempty"         swaggerignore:"true" table:"-"`
+
+	// Deletion state machine. While DeleteState is non-empty the piece is
+	// frozen: its deletion generation is held in DeleteManifest, only the
+	// owner identified by DeleteOwnerToken may advance it, and no new deal
+	// or CAR removal may target it. On failure the state becomes
+	// PieceDeletionPending with DeleteError populated while the piece and
+	// its car_blocks stay queryable.
+	DeleteState      PieceDeletionState     `cbor:"-" gorm:"index;default:''" json:"deleteState"`
+	DeleteOwnerToken string                 `cbor:"-" gorm:"size:255"         json:"-"                       swaggerignore:"true"`
+	DeleteLockedAt   *time.Time             `cbor:"-"                         json:"-"                       swaggerignore:"true"`
+	DeleteManifest   *PieceDeletionManifest `cbor:"-" gorm:"type:JSON"        json:"-"                       swaggerignore:"true"`
+	DeleteError      string                 `cbor:"-"                         json:"deleteError,omitempty"`
 }
 
 type CarBlockID uint64

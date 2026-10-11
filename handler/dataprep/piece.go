@@ -168,6 +168,18 @@ func (DefaultHandler) AddPieceHandler(
 	var existingCar model.Car
 	err = db.Where("piece_cid = ?", model.CID(pieceCID)).First(&existingCar).Error
 	if err == nil {
+		// A frozen piece is a closed generation: copying its metadata into a
+		// new preparation would create a new reference to a piece whose
+		// external object and indexes are being torn down.
+		frozen, err := HasFrozenPiece(ctx, db, model.CID(pieceCID))
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		if frozen {
+			return nil, errors.Wrapf(handlererror.ErrInvalidParameter,
+				"piece %s is being deleted and cannot be added to a preparation", request.PieceCID)
+		}
+
 		// found existing piece - copy metadata to new preparation
 		mCar := model.Car{
 			PieceCID:      existingCar.PieceCID,

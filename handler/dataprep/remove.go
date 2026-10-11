@@ -47,7 +47,13 @@ func (DefaultHandler) RemovePreparationHandler(ctx context.Context, db *gorm.DB,
 
 	var cars []model.Car
 	if request.RemoveCars {
-		err = db.Preload("Storage").Where("preparation_id = ?", preparation.ID).Find(&cars).Error
+		// Frozen (deleting/pending) pieces are owned by their deletion
+		// generation; removing their external objects here would race the
+		// piece deletion owner. The rows survive the SET NULL cascade and the
+		// healthcheck resumes orphaned pending pieces to completion.
+		err = db.Preload("Storage").
+			Where("preparation_id = ? AND delete_state = ?", preparation.ID, model.PieceDeletionNone).
+			Find(&cars).Error
 		if err != nil {
 			return errors.WithStack(err)
 		}

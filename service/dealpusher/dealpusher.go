@@ -357,6 +357,8 @@ func (d *DealPusher) runSchedule(ctx context.Context, schedule *model.Schedule) 
 				if d.maxReplicas > 0 && !schedule.Force {
 					query = query.Where("piece_cid NOT IN (?)", overReplicatedCIDs)
 				}
+				// Never schedule pieces frozen for deletion.
+				query = query.Where("delete_state = ?", model.PieceDeletionNone)
 				err = query.First(&car).Error
 			} else {
 				pieceCIDChunks := util.ChunkSlice(allowedPieceCIDs, util.BatchSize)
@@ -367,6 +369,8 @@ func (d *DealPusher) runSchedule(ctx context.Context, schedule *model.Schedule) 
 					if d.maxReplicas > 0 && !schedule.Force {
 						query = query.Where("piece_cid NOT IN (?)", overReplicatedCIDs)
 					}
+					// Never schedule pieces frozen for deletion.
+					query = query.Where("delete_state = ?", model.PieceDeletionNone)
 					err = query.First(&car).Error
 					if err == nil {
 						break
@@ -438,6 +442,20 @@ func (d *DealPusher) runSchedule(ctx context.Context, schedule *model.Schedule) 
 			if dealModel == nil {
 				continue
 			}
+
+			// The MakeDeal call may take a while; re-check that the piece was
+			// not frozen for deletion in the meantime so no new deal reference
+			// enters a piece that is being removed.
+			frozen, err := frozenPieceCIDSet(ctx, db, []model.CID{car.PieceCID})
+			if err != nil {
+				return "", errors.Wrap(err, "failed to verify piece deletion state")
+			}
+			if _, isFrozen := frozen[cid.Cid(car.PieceCID).String()]; isFrozen {
+				Logger.Warnw("piece was frozen for deletion while deal was being made, skipping",
+					"schedule_id", schedule.ID, "piece_cid", cid.Cid(car.PieceCID).String())
+				continue
+			}
+
 			dealModel.ScheduleID = &schedule.ID
 
 			Logger.Debugw("save accepted deal", "deal", dealModel)

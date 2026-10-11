@@ -190,6 +190,16 @@ func (d *DealPusher) runPDPSchedule(ctx context.Context, schedule *model.Schedul
 			}
 		}
 
+		// Re-check the frozen state before the on-chain pull so pieces frozen
+		// after selection neither get pulled nor receive new deals.
+		cars, err = filterFrozenCars(db, ctx, cars, schedule.ID)
+		if err != nil {
+			return model.ScheduleError, errors.Wrap(err, "failed to verify piece deletion states")
+		}
+		if len(cars) == 0 {
+			continue
+		}
+
 		pieceInputs := make([]PDPPieceInput, len(cars))
 		for i, car := range cars {
 			pieceInputs[i] = PDPPieceInput{
@@ -297,7 +307,8 @@ func (d *DealPusher) findPDPCars(
 		if d.maxReplicas > 0 && !schedule.Force {
 			query = query.Where("piece_cid NOT IN (?)", overReplicatedCIDs)
 		}
-		return query
+		// Never schedule pieces frozen for deletion.
+		return query.Where("delete_state = ?", model.PieceDeletionNone)
 	}
 
 	if len(allowedPieceCIDs) == 0 {

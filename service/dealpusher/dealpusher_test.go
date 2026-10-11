@@ -685,3 +685,68 @@ func generateRandomBytes(n int) []byte {
 	rand.Read(b)
 	return b
 }
+
+// TestDealMakerService_SkipsFrozenPiece verifies cars frozen in a piece
+// deletion (pending/deleting) are never selected for new market deals.
+func TestDealMakerService_SkipsFrozenPiece(t *testing.T) {
+	waitPendingInterval = 100 * time.Millisecond
+	defer func() {
+		waitPendingInterval = time.Minute
+	}()
+	testutil.All(t, func(ctx context.Context, t *testing.T, db *gorm.DB) {
+		service, err := NewDealPusher(db, testutil.TestLotusAPI, testutil.TestLotusToken, 1, 10)
+		require.NoError(t, err)
+		mockDealmaker := new(MockDealMaker)
+		service.dealMaker = mockDealmaker
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		provider := "f0miner"
+		client := "f0client"
+		schedule := model.Schedule{
+			Preparation: &model.Preparation{
+				Wallet: &model.Wallet{
+					Address: "f0xx", KeyPath: "/tmp/fake-key", KeyStore: "local",
+					ActorID: &client,
+				},
+				SourceStorages: []model.Storage{{}},
+			},
+			State:    model.ScheduleActive,
+			Provider: provider,
+		}
+		createTestActor(t, db, client)
+		require.NoError(t, db.Create(&schedule).Error)
+
+		normalCID := model.CID(calculateCommp(t, generateRandomBytes(1000), 1024))
+		frozenCID := model.CID(calculateCommp(t, generateRandomBytes(1000), 1024))
+		require.NoError(t, db.Create([]model.Car{
+			{
+				AttachmentID:  ptr.Of(model.SourceAttachmentID(1)),
+				PreparationID: ptr.Of(model.PreparationID(1)),
+				PieceCID:      frozenCID,
+				PieceSize:     1024,
+				StoragePath:   "frozen",
+				DeleteState:   model.PieceDeletionPending,
+			},
+			{
+				AttachmentID:  ptr.Of(model.SourceAttachmentID(1)),
+				PreparationID: ptr.Of(model.PreparationID(1)),
+				PieceCID:      normalCID,
+				PieceSize:     1024,
+				StoragePath:   "normal",
+			},
+		}).Error)
+
+		mockDealmaker.On("MakeDeal", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(&model.Deal{
+			ScheduleID: &schedule.ID,
+		}, nil)
+
+		service.runOnce(ctx)
+		time.Sleep(2 * time.Second)
+
+		var deals []model.Deal
+		require.NoError(t, db.Find(&deals).Error)
+		require.Len(t, deals, 1)
+		require.Equal(t, normalCID, deals[0].PieceCID)
+	})
+}

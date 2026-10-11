@@ -7,6 +7,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/data-preservation-programs/singularity/database"
+	"github.com/data-preservation-programs/singularity/handler/dataprep"
 	"github.com/data-preservation-programs/singularity/model"
 	"github.com/google/uuid"
 	"github.com/ipfs/go-log/v2"
@@ -78,7 +79,9 @@ func HealthCheckCleanup(ctx context.Context, db *gorm.DB) {
 	logger.Infow("found stale workers", "count", len(staleWorkers))
 
 	if len(staleWorkers) == 0 {
-		// Clean up orphaned records even if no stale workers
+		// Reconcile piece deletions and clean up orphaned records even if no
+		// stale workers
+		reconcilePieceDeletions(ctx, db)
 		cleanupOrphanedRecords(ctx, db)
 		logger.Infow("healthcheck cleanup cycle end")
 		return
@@ -143,9 +146,33 @@ func HealthCheckCleanup(ctx context.Context, db *gorm.DB) {
 		}
 	}
 
-	// Clean up orphaned records from deleted preparations (SET NULL cascades)
+	// Reconcile interrupted piece deletions, then clean up orphaned records
+	// from deleted preparations (SET NULL cascades)
+	reconcilePieceDeletions(ctx, db)
 	cleanupOrphanedRecords(ctx, db)
 	logger.Infow("healthcheck cleanup cycle end")
+}
+
+// reconcilePieceDeletions parks deleting leases whose owner is presumed dead
+// as queryable pending pieces, then drives pending pieces whose preparation
+// was removed concurrently (no preparation-scoped retry could reach them) to
+// completion using their frozen manifests.
+func reconcilePieceDeletions(ctx context.Context, db *gorm.DB) {
+	parked, err := dataprep.ReconcileStalePieceDeletions(ctx, db, time.Now().UTC())
+	if err != nil && !errors.Is(err, context.Canceled) {
+		logger.Errorw("failed to reconcile stale piece deletions", "error", err)
+	}
+	if parked > 0 {
+		logger.Infow("parked stale piece deletions as pending", "count", parked)
+	}
+
+	advanced, err := dataprep.ResumeOrphanedPendingPieceDeletions(ctx, db, dataprep.OrphanedPendingResumeLimit)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		logger.Errorw("failed to resume orphaned pending piece deletions", "error", err)
+	}
+	if advanced > 0 {
+		logger.Infow("completed orphaned pending piece deletions", "count", advanced)
+	}
 }
 
 // cleanupOrphanedRecords deletes orphaned records in batches.
@@ -156,17 +183,21 @@ func cleanupOrphanedRecords(ctx context.Context, db *gorm.DB) {
 
 	// files batch is smaller because each file deletion cascades SET NULL to
 	// car_blocks.file_id (write amplification ~= avg blocks per file).
-	reapPhase(db, dialect, "car_blocks", "car_id", 10000)
-	reapPhase(db, dialect, "files", "attachment_id", 200)
-	reapPhase(db, dialect, "cars", "preparation_id", 100)
-	reapPhase(db, dialect, "directories", "attachment_id", 100)
-	reapPhase(db, dialect, "jobs", "attachment_id", 100)
+	reapPhase(db, dialect, "car_blocks", "car_id", 10000, "")
+	reapPhase(db, dialect, "files", "attachment_id", 200, "")
+	// Frozen piece deletions (deleting/pending) must never be reaped: their
+	// manifest is the only thing standing between an external object and an
+	// untrackable orphan. Orphaned pending pieces are driven to completion by
+	// reconcilePieceDeletions first.
+	reapPhase(db, dialect, "cars", "preparation_id", 100, " AND delete_state = ''")
+	reapPhase(db, dialect, "directories", "attachment_id", 100, "")
+	reapPhase(db, dialect, "jobs", "attachment_id", 100, "")
 }
 
-func reapPhase(db *gorm.DB, dialect, table, column string, limit int) {
+func reapPhase(db *gorm.DB, dialect, table, column string, limit int, extraWhere string) {
 	logger.Infow("reaping orphans", "table", table, "column", column, "limit", limit)
 	start := time.Now()
-	result := execBatchDelete(db, dialect, table, column, limit)
+	result := execBatchDelete(db, dialect, table, column, limit, extraWhere)
 	elapsed := time.Since(start)
 	if result.Error != nil && !errors.Is(result.Error, context.Canceled) {
 		logger.Errorw("reap failed", "table", table, "error", result.Error, "elapsed_ms", elapsed.Milliseconds())
@@ -179,10 +210,11 @@ func reapPhase(db *gorm.DB, dialect, table, column string, limit int) {
 const reapStatementTimeout = "2min"
 
 // execBatchDelete deletes rows where column IS NULL with a batch limit.
-// On postgres the delete runs under SET LOCAL statement_timeout so a wedged
-// query errors out instead of hanging.
-func execBatchDelete(db *gorm.DB, dialect, table, column string, limit int) *gorm.DB {
-	sqlStr := "DELETE FROM " + table + " WHERE id IN (SELECT id FROM " + table + " WHERE " + column + " IS NULL LIMIT ?)"
+// extraWhere is appended verbatim (caller-controlled constants only) to the
+// orphan predicate. On postgres the delete runs under SET LOCAL
+// statement_timeout so a wedged query errors out instead of hanging.
+func execBatchDelete(db *gorm.DB, dialect, table, column string, limit int, extraWhere string) *gorm.DB {
+	sqlStr := "DELETE FROM " + table + " WHERE id IN (SELECT id FROM " + table + " WHERE " + column + " IS NULL" + extraWhere + " LIMIT ?)"
 
 	if dialect != "postgres" {
 		return db.Exec(sqlStr, limit)

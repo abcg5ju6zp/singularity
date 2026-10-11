@@ -8,6 +8,7 @@ import (
 	"github.com/data-preservation-programs/singularity/model"
 	"github.com/data-preservation-programs/singularity/replication"
 	"github.com/data-preservation-programs/singularity/util/testutil"
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -61,6 +62,24 @@ func TestSendManualHandler_WalletNotFound(t *testing.T) {
 		_, err := Default.SendManualHandler(ctx, db, nil, nil, mockDealMaker, proposal)
 		require.ErrorIs(t, err, handlererror.ErrNotFound)
 		require.ErrorContains(t, err, "wallet")
+	})
+}
+
+func TestSendManualHandler_PieceFrozenForDeletion(t *testing.T) {
+	testutil.All(t, func(ctx context.Context, t *testing.T, db *gorm.DB) {
+		createTestWalletAndActor(t, db, true)
+		pieceCID, err := cid.Decode(proposal.PieceCID)
+		require.NoError(t, err)
+		require.NoError(t, db.Create(&model.Car{
+			PieceCID:    model.CID(pieceCID),
+			PieceType:   model.DataPiece,
+			DeleteState: model.PieceDeletionDeleting,
+		}).Error)
+
+		mockDealMaker := new(MockDealMaker)
+		_, err = Default.SendManualHandler(ctx, db, nil, nil, mockDealMaker, proposal)
+		require.ErrorIs(t, err, handlererror.ErrInvalidParameter)
+		require.ErrorContains(t, err, "being deleted")
 	})
 }
 
