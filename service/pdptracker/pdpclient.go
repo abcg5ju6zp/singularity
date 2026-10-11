@@ -8,6 +8,7 @@ import (
 	"github.com/data-preservation-programs/go-synapse/contracts"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/filecoin-project/go-address"
 	"github.com/ipfs/go-cid"
@@ -41,10 +42,17 @@ func (c pdpVerifierCaller) GetActivePieces(opts *bind.CallOpts, setId *big.Int, 
 	return activePiecesResult{Pieces: result.Pieces, HasMore: result.HasMore}, nil
 }
 
+// headerSource fetches block headers by number. ethclient.Client satisfies
+// it; tests substitute a mock so reorgs can be driven deterministically.
+type headerSource interface {
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
+}
+
 type ChainPDPClient struct {
 	ethClient *ethclient.Client
 	contract  pdpContractCaller
 	pageSize  uint64
+	headers   headerSource
 }
 
 func NewPDPClient(ctx context.Context, rpcURL string, contractAddr common.Address) (*ChainPDPClient, error) {
@@ -67,6 +75,7 @@ func NewPDPClient(ctx context.Context, rpcURL string, contractAddr common.Addres
 		ethClient: ethClient,
 		contract:  pdpVerifierCaller{contract: verifier},
 		pageSize:  pdpDefaultPageSize,
+		headers:   ethClient,
 	}, nil
 }
 
@@ -119,6 +128,24 @@ func (c *ChainPDPClient) GetActivePieces(ctx context.Context, setID uint64) ([]c
 	}
 
 	return result, nil
+}
+
+// BlockHeader returns the number and hash of the block at the given height.
+// Pass num < 0 for the chain tip. Used for confirmation-depth gating and
+// canonical-chain (reorg) detection.
+func (c *ChainPDPClient) BlockHeader(ctx context.Context, num int64) (uint64, common.Hash, error) {
+	if c.headers == nil {
+		return 0, common.Hash{}, errors.New("block header source not configured")
+	}
+	var number *big.Int
+	if num >= 0 {
+		number = big.NewInt(num)
+	}
+	hdr, err := c.headers.HeaderByNumber(ctx, number)
+	if err != nil {
+		return 0, common.Hash{}, errors.Wrapf(err, "failed to get block header %d", num)
+	}
+	return hdr.Number.Uint64(), hdr.Hash(), nil
 }
 
 func commonToDelegatedAddress(subaddr common.Address) (address.Address, error) {

@@ -20,3 +20,8 @@ func TestPDPConfigValidate(t *testing.T) {
 		require.Error(t, cfg.Validate())
 	})
 }
+
+func TestPDPConfigConfirmationDepth(t *testing.T) {
+	require.EqualValues(t, defaultConfirmationDepth, (PDPConfig{PollingInterval: time.Second}).confirmationDepth())
+	require.EqualValues(t, 32, (PDPConfig{PollingInterval: time.Second, ConfirmationDepth: 32}).confirmationDepth())
+}

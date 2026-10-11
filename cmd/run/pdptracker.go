@@ -31,6 +31,11 @@ var PDPTrackerCmd = &cli.Command{
 			Usage: "How often to check for new events in Shovel tables",
 			Value: 30 * time.Second,
 		},
+		&cli.Uint64Flag{
+			Name:  "pdp-confirmations",
+			Usage: "Number of chain confirmations required before PDP events become visible; reorgs deeper than this trigger checkpoint rollback and replay",
+			Value: 10,
+		},
 		&cli.BoolFlag{
 			Name:  "full-sync",
 			Usage: "Re-index events from contract deployment by resetting the Shovel cursor. Derived PDP state (proof sets, deals) is preserved and updated via upserts. Requires an archival RPC node. Involves one RPC call per historical proof set.",
@@ -83,7 +88,8 @@ var PDPTrackerCmd = &cli.Command{
 		defer rpcClient.Close()
 
 		cfg := pdptracker.PDPConfig{
-			PollingInterval: c.Duration("pdp-poll-interval"),
+			PollingInterval:   c.Duration("pdp-poll-interval"),
+			ConfirmationDepth: c.Uint64("pdp-confirmations"),
 		}
 		if err := cfg.Validate(); err != nil {
 			return err

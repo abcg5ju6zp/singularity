@@ -201,6 +201,128 @@ func (Actor) TableName() string {
 	return "actors"
 }
 
+// PDPEventType identifies a PDP contract event in the processor-owned
+// event ledger. Values are stable and must not be renamed.
+type PDPEventType string
+
+const (
+	PDPEventDataSetCreated    PDPEventType = "dataset_created"
+	PDPEventSPChanged         PDPEventType = "sp_changed"
+	PDPEventPiecesAdded       PDPEventType = "pieces_added"
+	PDPEventPiecesRemoved     PDPEventType = "pieces_removed"
+	PDPEventNextProvingPeriod PDPEventType = "next_proving_period"
+	PDPEventPossessionProven  PDPEventType = "possession_proven"
+	PDPEventDataSetDeleted    PDPEventType = "dataset_deleted"
+)
+
+// PDPEventStatus is the processing state of a PDPEventRecord.
+type PDPEventStatus string
+
+const (
+	// PDPEventPending: ingested from the shovel inbox, not applied yet.
+	PDPEventPending PDPEventStatus = "pending"
+	// PDPEventApplied: effects are part of a confirmed checkpoint.
+	PDPEventApplied PDPEventStatus = "applied"
+	// PDPEventForked: block hash is no longer canonical; never applied or
+	// eligible for replay.
+	PDPEventForked PDPEventStatus = "forked"
+)
+
+// PDPEventRecord is the processor-owned durable copy of a shovel inbox row.
+// Unlike the shovel fact tables (which shovel truncates when it detects a
+// reorg), records here survive reorgs: rows from an abandoned fork are kept
+// with status forked and their effects are undone via PDPStateSnapshot,
+// while replacement rows on the new canonical chain carry a different
+// BlockHash and get replayed.
+type PDPEventRecord struct {
+	ID       uint64       `gorm:"primaryKey" json:"id"`
+	EventType PDPEventType `gorm:"type:text;not null;uniqueIndex:idx_pdp_event_key,priority:1;index:idx_pdp_event_block,priority:1" json:"eventType"`
+	BlockNum int64        `gorm:"not null;uniqueIndex:idx_pdp_event_key,priority:2;index:idx_pdp_event_block,priority:2;index:idx_pdp_event_pending,priority:2" json:"blockNum"`
+	BlockHash []byte      `gorm:"type:bytea;not null;uniqueIndex:idx_pdp_event_key,priority:3" json:"-"`
+	TxIdx    int          `gorm:"uniqueIndex:idx_pdp_event_key,priority:4" json:"txIdx"`
+	LogIdx   int          `gorm:"uniqueIndex:idx_pdp_event_key,priority:5" json:"logIdx"`
+	SetID    uint64       `gorm:"not null;index:idx_pdp_event_pending,priority:3" json:"setId"`
+
+	// event-specific payloads (only the columns relevant to EventType are set)
+	StorageProvider  []byte `gorm:"type:bytea" json:"-"`
+	NewSP            []byte `gorm:"type:bytea" json:"-"`
+	ChallengeEpoch   *int64 `json:"challengeEpoch,omitempty"`
+	LeafCount        *int64 `json:"leafCount,omitempty"`
+	DeletedLeafCount *int64 `json:"deletedLeafCount,omitempty"`
+
+	Status    PDPEventStatus `gorm:"type:text;not null;default:pending;index:idx_pdp_event_pending,priority:1" json:"status"`
+	AppliedAt *time.Time     `json:"appliedAt,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
+}
+
+func (PDPEventRecord) TableName() string { return "pdp_event_records" }
+
+// PDPChainCheckpoint marks that every event at block <= BlockNum (and, for
+// the tip block, every log position up to LastTxIdx/LastLogIdx) has been
+// applied to the derived tables from the chain identified by BlockHash.
+// Checkpoints are the common-ancestor search path during reorg recovery.
+type PDPChainCheckpoint struct {
+	BlockNum   int64     `gorm:"primaryKey;autoIncrement:false" json:"blockNum"`
+	BlockHash  []byte    `gorm:"type:bytea;not null" json:"-"`
+	LastTxIdx  int       `json:"lastTxIdx"`
+	LastLogIdx int       `json:"lastLogIdx"`
+	AppliedAt  time.Time `json:"appliedAt"`
+}
+
+func (PDPChainCheckpoint) TableName() string { return "pdp_chain_checkpoints" }
+
+// PDPSnapshotEntity identifies which derived table a PDPStateSnapshot row
+// captures.
+type PDPSnapshotEntity string
+
+const (
+	PDPSnapshotProofSet PDPSnapshotEntity = "proofset"
+	PDPSnapshotDeal     PDPSnapshotEntity = "deal"
+)
+
+// PDPStateSnapshot is a before-image of a derived row captured immediately
+// before a confirmed block's events are applied. During rollback, snapshots
+// are restored in descending block order so derived state returns exactly to
+// the nearest common checkpoint. Existed=false markers delete rows created by
+// the block (e.g. proof sets or deals).
+type PDPStateSnapshot struct {
+	ID        uint64             `gorm:"primaryKey" json:"id"`
+	BlockNum  int64              `gorm:"not null;uniqueIndex:idx_pdp_snapshot_key,priority:1" json:"blockNum"`
+	Entity    PDPSnapshotEntity  `gorm:"type:text;not null;uniqueIndex:idx_pdp_snapshot_key,priority:2" json:"entity"`
+	EntityID  uint64             `gorm:"not null;uniqueIndex:idx_pdp_snapshot_key,priority:3" json:"entityId"`
+	Existed   bool               `json:"existed"`
+	Data      []byte             `gorm:"type:bytea" json:"-"`
+	CreatedAt time.Time          `json:"createdAt"`
+}
+
+func (PDPStateSnapshot) TableName() string { return "pdp_state_snapshots" }
+
+// PDPSyncPhase is the persisted recovery state machine phase.
+type PDPSyncPhase string
+
+const (
+	// PDPSyncPhaseSyncing: normal forward event application.
+	PDPSyncPhaseSyncing PDPSyncPhase = "syncing"
+	// PDPSyncPhaseRollingBack: a reorg was detected; derived visibility is
+	// blocked until undo + replay reaches the confirmed chain tip.
+	PDPSyncPhaseRollingBack PDPSyncPhase = "rolling_back"
+)
+
+// PDPSyncState is the singleton (ID=1) durable recovery marker. A restart
+// resumes exactly the undo/replay position recorded here.
+type PDPSyncState struct {
+	ID         uint64         `gorm:"primaryKey" json:"id"`
+	Phase      PDPSyncPhase   `gorm:"type:text;not null;default:syncing" json:"phase"`
+	CommonNum  *int64         `json:"commonNum,omitempty"`
+	CommonHash []byte         `gorm:"type:bytea" json:"-"`
+	// UndoNext is the next block whose snapshots still need restoring.
+	UndoNext  *int64  `json:"undoNext,omitempty"`
+	Reason    string  `gorm:"type:text" json:"reason,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+func (PDPSyncState) TableName() string { return "pdp_sync_state" }
+
 type ProofSetHandoffState string
 
 const (

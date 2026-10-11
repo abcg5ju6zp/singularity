@@ -68,6 +68,32 @@ func NewPDPIndexer(ctx context.Context, pgURL string, rpcURL string, chainID uin
 				return nil, errors.Wrap(err, "failed to truncate "+ig.Table.Name)
 			}
 		}
+		// Reset the tracker's own reorg bookkeeping (event ledger,
+		// checkpoints, snapshots, recovery state). Derived proof sets and
+		// deals are intentionally preserved and re-derived idempotently.
+		if _, err := tx.Exec(ctx, `
+			DO $$
+			DECLARE
+				tbls text[] := ARRAY[
+					'pdp_event_records',
+					'pdp_chain_checkpoints',
+					'pdp_state_snapshots',
+					'pdp_sync_state'
+				];
+				t text;
+			BEGIN
+				FOREACH t IN ARRAY tbls LOOP
+					IF to_regclass(t) IS NOT NULL THEN
+						EXECUTE 'TRUNCATE TABLE ' || t;
+					END IF;
+				END LOOP;
+			END $$;
+		`); err != nil {
+			//nolint:errcheck
+			tx.Rollback(ctx)
+			pgp.Close()
+			return nil, errors.Wrap(err, "failed to reset tracker reorg state")
+		}
 		Logger.Infow("full resync: cleared indexer state, restarting from deployment block",
 			"startBlock", conf.Sources[0].Start)
 	}
@@ -127,19 +153,43 @@ func buildShovelConfig(pgURL, rpcURL string, chainID uint64, contract common.Add
 	}
 	addrCol := wpg.Column{Name: "log_addr", Type: "bytea"}
 
-	return config.Root{
-		PGURL:   pgURL,
-		Sources: []config.Source{src},
-		Integrations: []config.Integration{
-			dataSetCreatedIG(src, addrFilter, addrCol),
-			piecesAddedIG(src, addrFilter, addrCol),
-			piecesRemovedIG(src, addrFilter, addrCol),
-			nextProvingPeriodIG(src, addrFilter, addrCol),
-			possessionProvenIG(src, addrFilter, addrCol),
-			dataSetDeletedIG(src, addrFilter, addrCol),
-			spChangedIG(src, addrFilter, addrCol),
-		},
+	integrations := []config.Integration{
+		dataSetCreatedIG(src, addrFilter, addrCol),
+		piecesAddedIG(src, addrFilter, addrCol),
+		piecesRemovedIG(src, addrFilter, addrCol),
+		nextProvingPeriodIG(src, addrFilter, addrCol),
+		possessionProvenIG(src, addrFilter, addrCol),
+		dataSetDeletedIG(src, addrFilter, addrCol),
+		spChangedIG(src, addrFilter, addrCol),
 	}
+	// persist the block hash with every inbox row so the processor can
+	// canonicality-check events and checkpoint by height+hash+log position.
+	for i := range integrations {
+		addBlockHash(&integrations[i])
+	}
+
+	return config.Root{
+		PGURL:        pgURL,
+		Sources:      []config.Source{src},
+		Integrations: integrations,
+	}
+}
+
+// addBlockHash appends the canonical block_hash block datum and column to an
+// integration unless already present.
+func addBlockHash(ig *config.Integration) {
+	for _, b := range ig.Block {
+		if b.Name == "block_hash" {
+			return
+		}
+	}
+	ig.Block = append(ig.Block, dig.BlockData{Name: "block_hash", Column: "block_hash"})
+	for _, c := range ig.Table.Columns {
+		if c.Name == "block_hash" {
+			return
+		}
+	}
+	ig.Table.Columns = append(ig.Table.Columns, wpg.Column{Name: "block_hash", Type: "bytea"})
 }
 
 func dataSetCreatedIG(src config.Source, af dig.BlockData, ac wpg.Column) config.Integration {

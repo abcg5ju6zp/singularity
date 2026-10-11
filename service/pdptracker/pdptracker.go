@@ -159,5 +159,11 @@ func (p *PDPTracker) cleanup(ctx context.Context) error {
 
 func (p *PDPTracker) runOnce(ctx context.Context) error {
 	db := p.dbNoContext.WithContext(ctx)
-	return processNewEvents(ctx, db, p.rpcClient)
+	return runReorgAwareSync(ctx, db, p.rpcClient, p.config.confirmationDepth())
+}
+
+// SyncStatus returns the queryable reorg-recovery state; Blocked is true
+// while derived PDP state is being rolled back / replayed.
+func (p *PDPTracker) SyncStatus(ctx context.Context) (SyncStatus, error) {
+	return GetSyncStatus(ctx, p.dbNoContext.WithContext(ctx))
 }

@@ -29,6 +29,10 @@ var Tables = []any{
 	&Actor{},
 	&Wallet{},
 	&PDPProofSet{},
+	&PDPEventRecord{},
+	&PDPChainCheckpoint{},
+	&PDPStateSnapshot{},
+	&PDPSyncState{},
 }
 
 var logger = logging.Logger("model")
